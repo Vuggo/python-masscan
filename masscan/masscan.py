@@ -109,13 +109,13 @@ class PortScanner(object):
                         or sys.platform.startswith('darwin'):
                     p = subprocess.Popen(
                         [masscan_path, '-V'],
-                        bufsize=10000,
+                        bufsize=100,
                         stdout=subprocess.PIPE,
                         close_fds=True)
                 else:
                     p = subprocess.Popen(
                         [masscan_path, '-V'],
-                        bufsize=10000,
+                        bufsize=100,
                         stdout=subprocess.PIPE)
 
             except OSError:
@@ -266,30 +266,40 @@ class PortScanner(object):
                 type(ports))  # noqa
             assert type(arguments) is str, 'Wrong type for [arguments], should be a string [was {0}]'.format(
                 type(arguments))  # noqa
-
+            
         h_args = shlex.split(hosts)
         f_args = shlex.split(arguments)
 
         # Launch scan
-        args = [self._masscan_path, '-oX', '-'] + h_args + ['-p', ports] * (ports is not None) + f_args
+        args =  [self._masscan_path, '-oX', '-'] + h_args + ['-p', ports] * (ports is not None) + f_args
 
         logger.debug('Scan parameters: "' + ' '.join(args) + '"')
         self._args = ' '.join(args)
-
+        
         if sudo:
             args = ['sudo'] + args
-
+            
         p = subprocess.Popen(
             args,
-            bufsize=100000,
+            bufsize=100,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
 
+        print(p.stderr.read().decode())
+        while not p.poll():
+            l = p.stdout.readline().decode()
+            if l == '':                
+                break
+            else:                
+                print(l)                
+                p.stdout.flush()
+        
         # wait until finished
         # get output
         self._masscan_last_output, masscan_err = p.communicate()
+                
         if IS_PY2:
             self._masscan_last_output = bytes.decode(self._masscan_last_output)
             masscan_err = bytes.decode(masscan_err)
@@ -384,11 +394,14 @@ class PortScanner(object):
             dom = ET.fromstring(self._masscan_last_output)
         except Exception:
             if "found=0" in masscan_err:
-                raise NetworkConnectionError("network is unreachable.")
+                pass
+                #    raise NetworkConnectionError("network is unreachable.")
             if len(masscan_err_keep_trace) > 0:
-                raise PortScannerError(masscan_err)
+                pass
+                #raise PortScannerError(masscan_err)
             else:
-                raise PortScannerError(self._masscan_last_output)
+                pass
+                #raise PortScannerError(self._masscan_last_output)
 
         # masscan command line
         scan_result['masscan'] = {
@@ -467,159 +480,6 @@ class PortScanner(object):
             return True
 
         return False
-
-
-class PortScannerAsync(object):
-    """
-    PortScannerAsync allows to use masscan from python asynchronously
-    for each host scanned, callback is called with scan result for the host.
-
-    """
-
-    def __init__(self):
-        """
-        Initialize the module.
-
-        * detects masscan on the system and masscan version
-        * may raise PortScannerError exception if masscan is not found in the path
-
-        """
-        self._process = None
-        self._nm = PortScanner()
-
-    def __del__(self):
-        """
-        Cleanup when deleted
-
-        """
-        if self._process is not None:
-            try:
-                if self._process.is_alive():
-                    self._process.terminate()
-            except AssertionError:
-                # Happens on python3.4
-                # when using PortScannerAsync twice in a row
-                pass
-        self._process = None
-
-    def scan(self, hosts='127.0.0.1', ports=None, arguments='', callback=None, sudo=False):
-        """
-        Scan given hosts in a separate process and return host by host result using callback function
-
-        PortScannerError exception from standard masscan is catched and you won't know about but get None as scan_data
-
-        :param hosts: string for hosts as masscan use it 'scanme.masscan.org' or '198.116.0-255.1-127' or '216.163.128.20/20'
-        :param ports: string for ports as masscan use it '22,53,110,143-4564'
-        :param arguments: string of arguments for masscan '-sU -sX -sC'
-        :param callback: callback function which takes (host, scan_data) as arguments
-        :param sudo: launch masscan with sudo if true
-        """
-        if IS_PY2:
-            assert type(hosts) in (str, unicode), 'Wrong type for [hosts], should be a string [was {0}]'.format(
-                type(hosts))
-            assert type(ports) in (
-            str, unicode, type(None)), 'Wrong type for [ports], should be a string [was {0}]'.format(type(ports))
-            assert type(arguments) in (str, unicode), 'Wrong type for [arguments], should be a string [was {0}]'.format(
-                type(arguments))
-        else:
-            assert type(hosts) is str, 'Wrong type for [hosts], should be a string [was {0}]'.format(type(hosts))
-            assert type(ports) in (str, type(None)), 'Wrong type for [ports], should be a string [was {0}]'.format(
-                type(ports))
-            assert type(arguments) is str, 'Wrong type for [arguments], should be a string [was {0}]'.format(
-                type(arguments))
-
-        assert callable(callback) or callback is None, 'The [callback] {0} should be callable or None.'.format(
-            str(callback))
-
-        self._process = Process(
-            target=__scan_progressive__,
-            args=(self, hosts, ports, arguments, callback, sudo)
-        )
-        self._process.daemon = True
-        self._process.start()
-
-    def stop(self):
-        """Stop the current scan process.
-
-        """
-        if self._process is not None:
-            self._process.terminate()
-
-    def wait(self, timeout=None):
-        """
-        Wait for the current scan process to finish, or timeout
-
-        :param timeout: default = None, wait timeout seconds
-
-        """
-        assert type(timeout) in (
-        int, type(None)), 'Wrong type for [timeout], should be an int or None [was {0}]'.format(type(timeout))
-
-        self._process.join(timeout)
-
-    def still_scanning(self):
-        """
-        :returns: True if a scan is currently running, False otherwise
-
-        """
-        try:
-            return self._process.is_alive()
-        except:
-            return False
-
-
-class PortScannerYield(PortScannerAsync):
-    """
-    PortScannerYield allows to use masscan from python with a generator
-    for each host scanned, yield is called with scan result for the host
-
-    """
-
-    def __init__(self):
-        """
-        Initialize the module
-
-        * detects masscan on the system and masscan version
-        * may raise PortScannerError exception if masscan is not found in the path
-
-        """
-        PortScannerAsync.__init__(self)
-
-    def scan(self, hosts='127.0.0.1', ports=None, arguments='', sudo=False):
-        """
-        Scan given hosts in a separate process and return host by host result using callback function
-
-        PortScannerError exception from standard masscan is catched and you won't know about it
-
-        :param hosts: string for hosts as masscan use it 'scanme.masscan.org' or '198.116.0-255.1-127' or '216.163.128.20/20'
-        :param ports: string for ports as masscan use it '22,53,110,143-4564'
-        :param arguments: string of arguments for masscan '-sU -sX -sC'
-        :param sudo: launch masscan with sudo if true
-
-        """
-
-        assert type(hosts) is str, 'Wrong type for [hosts], should be a string [was {0}]'.format(type(hosts))
-        assert type(ports) in (str, type(None)), 'Wrong type for [ports], should be a string [was {0}]'.format(
-            type(ports))
-        assert type(arguments) is str, 'Wrong type for [arguments], should be a string [was {0}]'.format(
-            type(arguments))
-
-        for host in self._nm.listscan(hosts):
-            try:
-                scan_data = self._nm.scan(host, ports, arguments, sudo)
-            except PortScannerError:
-                scan_data = None
-            yield (host, scan_data)
-        return
-
-    def stop(self):
-        pass
-
-    def wait(self, timeout=None):
-        pass
-
-    def still_scanning(self):
-        pass
 
 
 class PortScannerError(Exception):
